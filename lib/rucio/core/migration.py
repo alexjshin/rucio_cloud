@@ -23,45 +23,22 @@ from re import match
 from string import Template
 from typing import TYPE_CHECKING, Any, Callable, Optional, Type, TypeVar
 
-from dogpile.cache.api import NO_VALUE
-from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, StatementError
-from sqlalchemy.exc import NoResultFound  # https://pydoc.dev/sqlalchemy/latest/sqlalchemy.exc.NoResultFound.html
-from sqlalchemy.sql import func
-from sqlalchemy.sql.expression import and_, or_, true, null, tuple_, false
 
 import rucio.core.did
 import rucio.core.lock  # import get_replica_locks, get_files_and_replica_locks_of_dataset
 import rucio.core.replica  # import get_and_lock_file_replicas, get_and_lock_file_replicas_for_dataset
 from rucio.common.cache import make_region_memcached
 from rucio.common.config import config_get
+from rucio.db.sqla.session import read_session, transactional_session, stream_session
+from rucio.db.sqla import models, filter_thread_work
 from rucio.common.exception import (InvalidRSEExpression, InvalidReplicationRule, InsufficientAccountLimit,
                                     DataIdentifierNotFound, RuleNotFound, InputValidationError, RSEOverQuota,
                                     ReplicationRuleCreationTemporaryFailed, InsufficientTargetRSEs, RucioException,
                                     InvalidRuleWeight, StagingAreaRuleRequiresLifetime, DuplicateRule,
                                     InvalidObject, RSEWriteBlocked, RuleReplaceFailed, RequestNotFound,
                                     ManualRuleApprovalBlocked, UnsupportedOperation, UndefinedPolicy, InvalidValueForKey,
-                                    InvalidSourceReplicaExpression)
-from rucio.common.policy import policy_filter, get_scratchdisk_lifetime
-from rucio.common.schema import validate_schema
-from rucio.common.types import InternalScope, InternalAccount
-from rucio.common.utils import str_to_date, sizefmt, chunks
-from rucio.core import account_counter, rse_counter, request as request_core, transfer as transfer_core
-from rucio.core.account import get_account
-from rucio.core.account import has_account_attribute
-from rucio.core.lifetime_exception import define_eol
-from rucio.core.message import add_message
-from rucio.core.monitor import MetricManager
-from rucio.core.plugins import PolicyPackageAlgorithms
-from rucio.core.rse import get_rse_name, list_rse_attributes, get_rse, get_rse_usage
-from rucio.core.rse_expression_parser import parse_expression
-from rucio.core.rse_selector import RSESelector
-from rucio.core.rule_grouping import apply_rule_grouping, repair_stuck_locks_and_apply_rule_grouping, create_transfer_dict, apply_rule
-from rucio.db.sqla import models, filter_thread_work
-from rucio.db.sqla.constants import (LockState, ReplicaState, RuleState, RuleGrouping,
-                                     DIDAvailability, DIDReEvaluation, DIDType, BadFilesStatus,
-                                     RequestType, RuleNotification, OBSOLETE, RSEType)
-from rucio.db.sqla.session import read_session, transactional_session, stream_session
+                                    InvalidSourceReplicaExpression, InvalidMigrationRule)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -70,6 +47,7 @@ if TYPE_CHECKING:
 REGION = make_region_memcached(expiration_time=900)
 METRICS = MetricManager(module=__name__)
 AutoApproveT = TypeVar('AutoApproveT', bound='AutoApprove')
+last_query_time = None
 
 
 @transactional_session
@@ -87,7 +65,7 @@ def add_migration(dids, account, rse_expression, notify=None, purge_replicas=Fal
     :param ignore_availability:        Option to ignore the availability of RSEs.
     :param comment:                    Comment about the rule.
     :param ask_approval:               Ask for approval for this rule.
-    :param asynchronous:               Create replication rule asynchronousl
+    :param asynchronous:               Create replication rule asynchronous
     
     
     y by the judge-injector.
@@ -101,5 +79,51 @@ def add_migration(dids, account, rse_expression, notify=None, purge_replicas=Fal
     :returns:                          A list of created replication rule ids.
     """
     
+    for did in dids: 
+        new_migration = models.Migration(account=account, 
+                                     name=did.name, 
+                                     scope=did.scope,
+                                     did_type=did.did_type,
+                                     rse_expression=rse_expression, 
+                                     )
+        
+        try: 
+            new_migration.save(session=session)
+        except IntegrityError as error: 
+            if match('.*ORA-00001.*', str(error.args[0])):
+                raise DuplicateRule(error.args[0]) from error
+            elif str(error.args[0]) == '(IntegrityError) UNIQUE constraint failed: rules.scope, rules.name, rules.account, rules.rse_expression, rules.copies':
+                raise DuplicateRule(error.args[0]) from error
+            raise InvalidMigrationRule(error.args[0]) from error
 
+@read_session
+def get_migration_records(total_workers: int, worker_number: int, limit: int = 100, *, session: Session):
+    """
+    Get migration records inserted since the last query.
 
+    :param total_workers: Number of total workers.
+    :param worker_number: ID of the executing worker.
+    :param limit:         Maximum number of records to return.
+    :param session:       Database session in use.
+    """
+    global last_query_time
+
+    # Update the query to filter records based on the last query timestamp
+    query = session.query(models.Migration).\
+        order_by(models.Migration.created_at)
+
+    if last_query_time:
+        query = query.filter(models.Migration.created_at > last_query_time)
+
+    query = filter_thread_work(session=session, query=query, total_threads=total_workers, thread_id=worker_number, hash_variable='id')
+
+    if limit:
+        records = query.limit(limit).all()
+    else:
+        records = query.all()
+
+    # Update last query time for the next execution
+    if records:
+        last_query_time = max(record.created_at for record in records)
+
+    return records

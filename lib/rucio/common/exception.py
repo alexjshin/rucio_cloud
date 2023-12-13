@@ -1090,3 +1090,12 @@ class DeprecationError(RucioException):
         super(DeprecationError, self).__init__(*args, **kwargs)
         self._message = 'Command or function has been deprecated.'
         self.error_code = 105
+
+class InvalidMigrationRule(RucioException):
+    """
+    RucioException
+    """
+    def __init__(self, *args, **kwargs):
+        super(InvalidMigrationRule, self).__init__(*args, **kwargs)
+        self._message = "Provided migration request is considered invalid."
+        self.error_code = 106

@@ -1010,6 +1010,24 @@ class RSEFileAssociationHistory(BASE, ModelBase):
                    ForeignKeyConstraint(['rse_id'], ['rses.id'], name='REPLICAS_HIST_RSE_ID_FK'),
                    CheckConstraint('bytes IS NOT NULL', name='REPLICAS_HIST_SIZE_NN'))
 
+class Migration(BASE, ModelBase):
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), default=utils.generate_uuid)
+    account: Mapped[InternalAccount] = mapped_column(InternalAccountString(get_schema_value('ACCOUNT_LENGTH')))
+    scope: Mapped[InternalScope] = mapped_column(InternalScopeString(get_schema_value('SCOPE_LENGTH')))
+    name: Mapped[str] = mapped_column(String(get_schema_value('NAME_LENGTH')))
+    did_type: Mapped[DIDType] = mapped_column(Enum(DIDType, name='RULES_DID_TYPE_CHK',
+                                                   create_constraint=True,
+                                                   values_callable=lambda obj: [e.value for e in obj]))
+    rse_expression: Mapped[str] = mapped_column(String(3000))
+
+class CloudCost(BASE, ModelBase):
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), default=utils.generate_uuid)
+    provider: Mapped[str] = mapped_column(String(255))  # Name of the cloud provider (e.g., 'AWS', 'Azure', 'GCP')
+    tier: Mapped[str] = mapped_column(String(255))  # Description of the tier (e.g., '0-50TB', '50-100TB')
+    price_per_gb: Mapped[Float] = mapped_column(Float)  # Price per GB in this tier
+    upper_size_limit_gb: Mapped[Integer] = mapped_column(Integer)  # Upper limit of the tier in GB
+    lower_size_limit_gb: Mapped[Integer] = mapped_column(Integer) # Lower limit of the tier in GB
+    
 
 class ReplicationRule(BASE, ModelBase):
     """Represents data identifier replication rules"""
@@ -1710,6 +1728,7 @@ def register_models(engine):
               LifetimeExceptions,
               Message,
               MessageHistory,
+              Migration,
               NamingConvention,
               OAuthRequest,
               QuarantinedReplica,
@@ -1779,6 +1798,7 @@ def unregister_models(engine):
               LifetimeExceptions,
               Message,
               MessageHistory,
+              Migration,
               NamingConvention,
               OAuthRequest,
               QuarantinedReplica,
