@@ -4,6 +4,9 @@ import logging
 import time
 from typing import List, Tuple
 from datetime import datetime
+from lib.rucio.core.rse_expression_parser import parse_expression
+from lib.rucio.core.rse_selector import RSESelector
+from lib.rucio.daemons.migration.did import DID
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,12 +22,12 @@ logging.getLogger("sqlalchemy").setLevel(logging.CRITICAL)
 DAEMON_NAME = 'migration'
 SLEEP_INTERVAL = 300  # 5 minutes in seconds
 graceful_stop = threading.Event()
+# pending_transfers = set()
 
 def migration_injector(once=False, sleep_time=SLEEP_INTERVAL):
     """
     Main loop to check for asynchronous creation of replication rules
     """
-    paused_rules = {}  # {rule_id: datetime}
     run_daemon(
         once=once,
         graceful_stop=graceful_stop,
@@ -54,12 +57,12 @@ def run_once(heartbeat_handler, **_kwargs):
             
             # Compute the non-cloud assignments
             optimal_assignment = {}
-            compute_non_cloud_assignments(non_cloud_records, optimal_assignment)
+            compute_non_cloud_assignments(non_cloud_records, optimal_assignment, session)
             
             # Process records with CMO
-            dids, feasible_rses = prepare_cloud_cmo_input(records)
+            dids, feasible_rses = prepare_cloud_cmo_input(cloud_records, session)
             if dids and feasible_rses:
-                hyperplanes = identify_hyperplanes(dids, feasible_rses)
+                hyperplanes = identify_hyperplanes(dids, feasible_rses, session)
                 interior_points = computePointsZeroB(hyperplanes)  # Assuming this is defined in cmo.py
                 compute_extremal_assignments(dids, feasible_rses, interior_points, optimal_assignment)
 
@@ -92,17 +95,41 @@ def separate_records_based_on_rse_expression(records: List[Migration]):
 
     return records_without_cloud, records_with_cloud
 
-def compute_non_cloud_assignments(non_cloud_records, optimal_assignment):
-    pass
+def compute_non_cloud_assignments(non_cloud_records, optimal_assignment, session):
+    
+    for non_cloud_record in non_cloud_records:
+        preferred_rses = parse_expression(non_cloud_record.rse_expression, filter_={'vo': non_cloud_record.account.vo}, session=session)
+        rseselector = RSESelector(account=non_cloud_record.account,
+                            rses=preferred_rses,
+                            weight=non_cloud_record.weight,
+                            copies=non_cloud_record.copies,
+                            ignore_account_limit=non_cloud_record.ignore_account_limit,
+                            session=session)
+        target_rse = rseselector.select_rse(non_cloud_record.size, preferred_rses, non_cloud_record.copies)
+        optimal_assignment[non_cloud_record] = target_rse
 
 
-def prepare_cloud_cmo_input(records):
-    pass
+def prepare_cloud_cmo_input(records, session):
+    dids = []
+    feasible_rses = {}
+
+    for record in records:
+        # Create a DID object for each Migration record
+        # Placeholder values for size and replicationRule as they are not part of the Migration schema
+        did_obj = DID(did=record.name, size=0, replicationRule=record.rse_expression)
+        dids.append(did_obj)
+
+        # Determine feasible RSEs using the parse_expression function
+        rses = parse_expression(record.rse_expression, filter_={'vo': record.account.vo}, session=session)
+        feasible_rses[record.name] = rses
+
+    return dids, feasible_rses
 
 def process_optimal_assignments(assignments):
     """
     Sends the new assignments to the conveyor based on if their assignment has changed from their current RSE
     """
+    
     pass
 
 def stop(signum=None, frame=None):

@@ -3,6 +3,9 @@ from typing import List, Dict, Tuple, Set
 from intpoints.computeP import *
 from did import DID
 from rse import RSE
+from sqlalchemy.orm import Session
+from sqlalchemy import and_
+from rucio.db.sqla.models import CloudCost
 
 # Example structure for DIDs (Data Identifiers) and RSEs (Rucio Storage Elements)
 # DIDs will be represented as strings and RSEs as integers for simplicity
@@ -10,21 +13,46 @@ from rse import RSE
 # RSE = int
 
 # Example cost function, modeled as a concave function (simplified version)
-def cost_function(size: int) -> float:
-    return 1 / np.sqrt(size) if size > 0 else 0
+def cost_function(size: int, rse: RSE, session: Session) -> float:
+    """
+    Calculate the cost based on data size, RSE, and the cloud cost details.
+
+    :param size: Size of the data in GB.
+    :param rse: Rucio Storage Element.
+    :param session: Database session.
+    :return: Calculated cost.
+    """
+    # Query for the cloud provider based on the RSE's name
+    provider = rse.name  # Assuming this directly gives the provider's name
+
+    # Find the appropriate cost tier for the given size and provider
+    cost_record = session.query(CloudCost).filter(
+        CloudCost.provider == provider,
+        CloudCost.lower_size_limit_gb <= size,
+        CloudCost.upper_size_limit_gb >= size
+    ).first()
+
+    if cost_record:
+        # Calculate the cost based on the price per GB
+        return size * cost_record.price_per_gb
+    else:
+        # Handle cases where no cost record is found
+        raise ValueError(f"No cost record found for provider '{provider}' and size '{size}' GB")
+
+    return 0.0
 
 # Function to convert a DID into a vector representation
 # This is a placeholder function and will need actual logic based on the problem specifics
-def vAsVector(did: DID, feasible_rses: Dict[RSE, Set[DID]]) -> np.ndarray:
+def vAsVector(did: DID, feasible_rses: Dict[RSE, Set[DID]], session) -> np.ndarray:
     # Example: Vector length equals number of RSEs, with cost values if DID is feasible for the RSE
-    vec = np.array([cost_function(1) if did in feasible_rses[rse] else 0 for rse in feasible_rses])
+    vec = np.array([cost_function(did.size, rse, session) if did in feasible_rses[rse] else 0 for rse in feasible_rses])
     return vec
     
 # Function to identify hyperplanes
-def identify_hyperplanes(dids: List[DID], feasible_rses: Dict[RSE, Set[DID]]) -> List[np.ndarray]:
+def identify_hyperplanes(dids: List[DID], feasible_rses: Dict[RSE, Set[DID]], session) -> List[np.ndarray]:
     hyperplanes = []
     for did in dids:
-        vVec = vAsVector(did, feasible_rses)
+        vVec = vAsVector(did, feasible_rses, session)
         for k in feasible_rses:
             for j in feasible_rses:
                 if k != j and did in feasible_rses[k] and did in feasible_rses[j]:
